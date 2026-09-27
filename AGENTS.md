@@ -237,7 +237,7 @@ API_URL=http://localhost:8787 npm run dev --workspace=@vmp/web   # Nuxt dev on p
 
 ### Database setup
 
-Before the API can serve data, apply all D1 migrations in order:
+**Local:** before the API can serve data, apply all D1 migrations in order:
 
 ```bash
 cd packages/api
@@ -245,6 +245,17 @@ for f in $(ls -1 migrations/*.sql | sort); do
   npx wrangler d1 execute video-subscription-db --local --file="$f"
 done
 ```
+
+For an **initialized** local database (base tables already present), repair missing required columns/tables with:
+
+```bash
+cd packages/api
+bash ./scripts/ensure_d1_required_schema.sh --local
+```
+
+Do not use the ensure script as a substitute for the ordered migrations on a fresh empty database — it only `ALTER`s / creates add-on tables and fails if `users` (etc.) are missing.
+
+**Remote (staging/production):** do **not** use `wrangler d1 migrations apply` unless `d1_migrations` is known in sync. Prefer `bash ./scripts/ensure_d1_required_schema.sh --remote` from `packages/api` (also run by CD + five-minute Worker cron). If `migrations apply` already failed with `table irl_events already exists`, see `DEPLOYMENT.md` and `scripts/repair_d1_wrangler_migration_history.sh`.
 
 Seed videos default to `publish_status = 'draft'`. To make them visible on the public homepage:
 
@@ -299,6 +310,8 @@ REPLICATION_TARGET_TOKEN — bearer token for replication ingest (same value as 
 Optional API Worker **vars** (runtime, Cloudflare dashboard / `wrangler.json` / `.dev.vars` — not GitHub Actions):
 
 ```text
+API_URL — public base URL of this API Worker (e.g. https://vmp-api.tjm.sk). Required for Qerko/legacy and GoPay webhook notifyUrl. Staging/prod CD passes it via `wrangler deploy --var API_URL:…` from `API_URL_STAGING` / `API_URL_PROD`.
+FRONTEND_URL — public frontend origin for checkout return URLs (also in wrangler.json; CD overrides per tier).
 POSTHOG_PROJECT_TOKEN — public PostHog project token (same value as NUXT_PUBLIC_POSTHOG_KEY on the frontend)
 POSTHOG_HOST          — ingest host; defaults to https://eu.i.posthog.com (also in wrangler.json vars)
 ```

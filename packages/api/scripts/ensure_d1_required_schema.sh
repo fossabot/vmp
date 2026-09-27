@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # Idempotent D1 schema the current API Worker requires.
-# Do not run `wrangler d1 migrations apply` for the historical migrations/
-# tree — those files were applied with `d1 execute --file` and are not Wrangler
-# migration history. This script only adds missing columns/tables.
+#
+# IMPORTANT (remote/staging/production):
+#   Prefer this script (and the Worker cron ensure). Do NOT run
+#   `wrangler d1 migrations apply` against a DB whose schema was already
+#   created via `d1 execute --file` / ensure — non-idempotent CREATE TABLE
+#   migrations (e.g. 0067 irl_events) will fail with "already exists" while
+#   leaving later migrations (e.g. 0068 otp_hash) unapplied in Wrangler history.
+#   If that already happened, see DEPLOYMENT.md and
+#   scripts/repair_d1_wrangler_migration_history.sh.
+#
+# Historical migrations/*.sql were applied with `d1 execute --file` and are not
+# Wrangler migration history. This script only adds missing columns/tables.
 set -euo pipefail
 
 DB_NAME="${DB_NAME:-video-subscription-db}"
@@ -46,6 +55,20 @@ else
   npx wrangler d1 execute "$DB_NAME" "$MODE_FLAG" --command \
     "ALTER TABLE users ADD COLUMN deletion_pending INTEGER NOT NULL DEFAULT 0;"
 fi
+
+if column_exists magic_link_tokens otp_hash; then
+  echo "[ensure-d1] magic_link_tokens.otp_hash already present"
+else
+  echo "[ensure-d1] adding magic_link_tokens.otp_hash"
+  npx wrangler d1 execute "$DB_NAME" "$MODE_FLAG" --command \
+    "ALTER TABLE magic_link_tokens ADD COLUMN otp_hash TEXT;"
+fi
+
+# Partial index is optional; ignore failure if the column was just added on a
+# dialect that rejects IF NOT EXISTS on indexes (D1 accepts it).
+npx wrangler d1 execute "$DB_NAME" "$MODE_FLAG" --command \
+  "CREATE INDEX IF NOT EXISTS idx_magic_link_otp_hash ON magic_link_tokens(otp_hash) WHERE otp_hash IS NOT NULL;" \
+  >/dev/null || echo "[ensure-d1] idx_magic_link_otp_hash skipped/already ok"
 
 echo "[ensure-d1] ensuring Step 10 tables/indexes"
 npx wrangler d1 execute "$DB_NAME" "$MODE_FLAG" --file=./scripts/ensure_d1_step10_tables.sql
