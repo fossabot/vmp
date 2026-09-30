@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { capturePostHogEvent } from '../utils/posthogClient';
+import {
+  approvedMetricAttributes,
+  capturePostHogEvent,
+  recordPostHogCount,
+} from '../utils/posthogClient';
 import { canCapturePostHogAnalytics, POSTHOG_ANALYTICS_CONSENT_KEY } from '../utils/posthogConsent';
 
 type PostHogCaptureFn = (event: string, properties?: Record<string, unknown>) => unknown;
@@ -9,11 +13,19 @@ type WindowWithPostHog = {
   posthog?: {
     capture: PostHogCaptureFn;
     is_capturing?: () => boolean;
+    metrics?: {
+      count: (name: string, value?: number, options?: unknown) => void;
+    };
   };
 };
 
 type GlobalWithUseNuxtApp = typeof globalThis & {
-  useNuxtApp?: () => { $posthog?: () => { capture: PostHogCaptureFn } };
+  useNuxtApp?: () => {
+    $posthog?: () => {
+      capture: PostHogCaptureFn;
+      metrics?: { count: (name: string, value?: number, options?: unknown) => void };
+    };
+  };
 };
 
 function setWindow(next: WindowWithPostHog | undefined): void {
@@ -53,6 +65,40 @@ describe('posthogClient', () => {
     delete (globalThis as GlobalWithUseNuxtApp).useNuxtApp;
   });
 
+  it('approvedMetricAttributes keep only allowlisted keys and values', () => {
+    assert.deepEqual(
+      approvedMetricAttributes({
+        plan_type: 'monthly',
+        provider: 'stripe',
+        client: 'browser',
+        surface: 'checkout',
+        rendition: '720p',
+        reason: 'verify_error',
+        optedOut: true,
+        video_id: 'v1',
+        nested: { a: 1 },
+      }),
+      {
+        plan_type: 'monthly',
+        provider: 'stripe',
+        client: 'browser',
+        surface: 'checkout',
+        rendition: '720p',
+        reason: 'verify_error',
+        optedOut: true,
+      },
+    );
+    assert.deepEqual(
+      approvedMetricAttributes({
+        plan_type: 'lifetime',
+        provider: 'paypal',
+        surface: 'unknown_surface',
+        rendition: '4k',
+      }),
+      {},
+    );
+  });
+
   it('capturePostHogEvent is a no-op without a PostHog client', () => {
     assert.doesNotThrow(() => {
       capturePostHogEvent('magic_link_requested');
@@ -76,10 +122,16 @@ describe('posthogClient', () => {
 
   it('capturePostHogEvent forwards events via getBrowserPostHog after consent', () => {
     const captured: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    const metricCounts: Array<{ name: string; value: number; options?: unknown }> = [];
     setWindow({
       posthog: {
         capture: (event, properties) => {
           captured.push({ event, properties: properties ?? {} });
+        },
+        metrics: {
+          count: (name, value, options) => {
+            metricCounts.push({ name, value: value ?? 1, options });
+          },
         },
       },
     });
@@ -108,6 +160,23 @@ describe('posthogClient', () => {
       $environment: 'development',
       plan_type: 'monthly',
       provider: 'stripe',
+    });
+    assert.deepEqual(
+      metricCounts.map((row) => row.name),
+      [
+        'subscription_checkout_started',
+        'subscription_checkout_completed',
+        'offline_download_requested',
+        'billing_portal_opened',
+        'magic_link_requested',
+      ],
+    );
+    assert.deepEqual(metricCounts[0]?.options, {
+      attributes: { plan_type: 'monthly', provider: 'stripe' },
+    });
+    // video_id is not an approved metric dimension — only rendition remains.
+    assert.deepEqual(metricCounts[2]?.options, {
+      attributes: { rendition: '720p' },
     });
   });
 
@@ -168,6 +237,22 @@ describe('posthogClient', () => {
       assert.deepEqual(captured, [], `expected no capture when consent is ${String(consent)}`);
       assert.equal(canCapturePostHogAnalytics(), false);
     }
+  });
+
+  it('recordPostHogCount is a no-op without consent', () => {
+    const metricCounts: string[] = [];
+    setWindow({
+      posthog: {
+        capture: () => {},
+        metrics: {
+          count: (name) => {
+            metricCounts.push(name);
+          },
+        },
+      },
+    });
+    recordPostHogCount('checkout.completed');
+    assert.deepEqual(metricCounts, []);
   });
 
   it('capturePostHogEvent swallows client capture errors', () => {
