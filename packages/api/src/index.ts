@@ -90,12 +90,7 @@ import {
 } from './cmsPages.js';
 import { applySessionBookmark, getDb, getReadSession } from './d1Session.js';
 import { handleAdminDeploymentFeatures } from './deploymentFeaturesAdmin.js';
-import {
-  handleAccountInvoices,
-  handleAdminEInvoiceById,
-  handleAdminEInvoices,
-  handleAdminEInvoicingSettings,
-} from './eInvoicing.js';
+import { handlePublicDeploymentFeatures } from './deploymentFeaturesPublic.js';
 import { ensureD1RequiredSchema } from './ensureD1RequiredSchema.js';
 import { handlePersonalFeed, handlePublicFeed } from './feed.js';
 import {
@@ -115,19 +110,7 @@ import {
   handleListAccountIrlEvents,
 } from './irlEvents.js';
 import { isPrivateHost } from './is-private-host.js';
-import {
-  handleAdminLegacyMigrationRelinkCandidates,
-  handleAdminLegacyMigrationSendRelinkEmail,
-  handleAdminLegacyMigrationStats,
-  handleAdminLegacyMigrationValidateBatch,
-} from './legacyMigration.js';
-import {
-  handleAdminLegacyPaymentSettings,
-  handleLegacyCheckout,
-  handleLegacyComplete,
-  handleLegacyOrderStatus,
-  handleLegacyWebhook,
-} from './legacyPayments.js';
+import { isBillingProxyPath, proxyToBilling } from './billingProxy.js';
 import { normalizeLivestreamStatus } from './livestreams.js';
 import { log, runWithDatadogLogContext, setWorkerLogTracingContext } from './logger.js';
 import {
@@ -161,21 +144,6 @@ import {
   handleRevokeDownload,
   handleRevokeOfflineDevice,
 } from './offlineDownloads.js';
-import {
-  handleAdminPaymentPlans,
-  handleAdminPaymentSettings,
-  handleCancelSubscription,
-  handleCheckout,
-  handleComgateWebhook,
-  handleGetPricing,
-  handleGetStripeConfig,
-  handleGetSubscription,
-  handleGoPayWebhook,
-  handlePortal,
-  handleSessionStatus,
-  handleWebhook,
-  runComgateRenewalJobs,
-} from './payments.js';
 import { handleVideoPipelineStatus } from './pipelineStatus.js';
 import {
   handleAdminClearPlaybackPositions,
@@ -199,14 +167,6 @@ import {
   resolvePostHogLogTracingContext,
 } from './posthog.js';
 import { recordHttpServerRequestMetric } from './posthogMetrics.js';
-import {
-  handleAdminIsicCampaigns,
-  handleAdminPromoCampaigns,
-  handleAdminPromoCodes,
-  handleIsicCampaignPublic,
-  handleIsicValidate,
-  handlePromoValidate,
-} from './promotions.js';
 import {
   createPushCampaignAndDeliveries,
   enqueueOverduePushDeliveries,
@@ -254,10 +214,6 @@ import { readRssTokenVersion } from './rssToken.js';
 import { handleSiteFooterAdmin, handleSiteFooterPublic } from './siteFooter.js';
 import { handleSiteSettings } from './siteSettings.js';
 import { handleAdminSmokeAuth } from './smokeAuth.js';
-import {
-  handleAccountTransferSubscription,
-  handleAdminTransferSubscription,
-} from './subscriptionTransfer.js';
 import {
   handleThumbnailDelete,
   handleThumbnailUpload,
@@ -586,8 +542,17 @@ const workerHandler = {
               });
             }
 
-            const featureBlock = maybeBlockDeploymentFeatureRoute(request, env, corsHeaders);
+            const featureBlock = await maybeBlockDeploymentFeatureRoute(
+              request,
+              env,
+              corsHeaders,
+            );
             if (featureBlock) return featureBlock;
+
+            // Billing Worker owns payment HTTP (service binding).
+            if (isBillingProxyPath(url.pathname)) {
+              return proxyToBilling(request, env, corsHeaders);
+            }
 
             // ── Auth routes ───────────────────────────────────────────────────────────
             if (url.pathname === '/api/auth/magic-link' && request.method === 'POST') {
@@ -799,51 +764,13 @@ const workerHandler = {
               return handleAdminNewsletterCampaigns(request, env, corsHeaders);
             }
             if (
-              url.pathname === '/api/admin/payments/settings' &&
-              ['GET', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminPaymentSettings(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/einvoicing/settings' &&
-              ['GET', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminEInvoicingSettings(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/admin/einvoicing/invoices' && request.method === 'GET') {
-              return handleAdminEInvoices(request, env, corsHeaders);
-            }
-            {
-              const eInvoiceById = url.pathname.match(
-                /^\/api\/admin\/einvoicing\/invoices\/([^/]+)$/,
-              );
-              if (eInvoiceById?.[1] && request.method === 'GET') {
-                return handleAdminEInvoiceById(request, env, corsHeaders, eInvoiceById[1]);
-              }
-            }
-            if (
-              url.pathname === '/api/admin/promotions/campaigns' &&
-              ['GET', 'POST', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminPromoCampaigns(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/promotions/codes' &&
-              ['GET', 'POST', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminPromoCodes(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/isic/campaigns' &&
-              ['GET', 'POST', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminIsicCampaigns(request, env, corsHeaders);
-            }
-            if (
               url.pathname === '/api/admin/site-settings' &&
               ['GET', 'PATCH'].includes(request.method)
             ) {
               return handleSiteSettings(request, env, corsHeaders);
+            }
+            if (url.pathname === '/api/deployment-features' && request.method === 'GET') {
+              return handlePublicDeploymentFeatures(request, env, corsHeaders);
             }
             if (url.pathname === '/api/admin/deployment-features' && request.method === 'GET') {
               return handleAdminDeploymentFeatures(request, env, corsHeaders);
@@ -920,12 +847,6 @@ const workerHandler = {
               return handleAdminNewsletterDrafts(request, env, corsHeaders);
             }
             if (
-              url.pathname === '/api/admin/payments/plans' &&
-              ['GET', 'PATCH'].includes(request.method)
-            ) {
-              return handleAdminPaymentPlans(request, env, corsHeaders);
-            }
-            if (
               url.pathname === '/api/admin/rss/podcast-rebuild-webhook' &&
               ['GET', 'PATCH'].includes(request.method)
             ) {
@@ -954,12 +875,6 @@ const workerHandler = {
             }
             if (url.pathname === '/api/admin/users/import-csv' && request.method === 'POST') {
               return handleAdminUserImportCsv(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/users/transfer-subscription' &&
-              request.method === 'POST'
-            ) {
-              return handleAdminTransferSubscription(request, env, corsHeaders);
             }
             if (
               url.pathname === '/api/admin/analytics' &&
@@ -1091,66 +1006,6 @@ const workerHandler = {
             ) {
               return handleCategoryVideosBySlug(request, env, corsHeaders);
             }
-            if (url.pathname === '/api/account/pricing' && request.method === 'GET') {
-              return handleGetPricing(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/stripe-config' && request.method === 'GET') {
-              return handleGetStripeConfig(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/checkout' && request.method === 'POST') {
-              return handleCheckout(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/session-status' && request.method === 'GET') {
-              return handleSessionStatus(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/webhook' && request.method === 'POST') {
-              return handleWebhook(request, env, corsHeaders, 'stripe', ctx);
-            }
-            if (url.pathname === '/api/payments/webhook/stripe' && request.method === 'POST') {
-              return handleWebhook(request, env, corsHeaders, 'stripe', ctx);
-            }
-            if (url.pathname === '/api/payments/webhook/gopay' && request.method === 'GET') {
-              return handleGoPayWebhook(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/webhook/comgate' && request.method === 'POST') {
-              return handleComgateWebhook(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/webhook/legacy' && request.method === 'POST') {
-              return handleLegacyWebhook(request, env, corsHeaders, ctx);
-            }
-            if (url.pathname === '/api/payments/legacy/checkout' && request.method === 'POST') {
-              return handleLegacyCheckout(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/legacy/complete' && request.method === 'POST') {
-              return handleLegacyComplete(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/legacy/order-status' && request.method === 'GET') {
-              return handleLegacyOrderStatus(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/admin/payments/legacy' && request.method === 'GET') {
-              return handleAdminLegacyPaymentSettings(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/admin/legacy-migration/stats' && request.method === 'GET') {
-              return handleAdminLegacyMigrationStats(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/legacy-migration/validate-batch' &&
-              request.method === 'POST'
-            ) {
-              return handleAdminLegacyMigrationValidateBatch(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/legacy-migration/relink-candidates' &&
-              request.method === 'GET'
-            ) {
-              return handleAdminLegacyMigrationRelinkCandidates(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/admin/legacy-migration/send-relink-email' &&
-              request.method === 'POST'
-            ) {
-              return handleAdminLegacyMigrationSendRelinkEmail(request, env, corsHeaders);
-            }
             // ── Offline downloads (M1/M2) ─────────────────────────────────────────────
             if (url.pathname === '/api/offline/devices/register' && request.method === 'POST') {
               return handleRegisterOfflineDevice(request, env, corsHeaders);
@@ -1210,18 +1065,6 @@ const workerHandler = {
               }
             }
 
-            if (url.pathname === '/api/account/subscription' && request.method === 'GET') {
-              return handleGetSubscription(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/account/promotions/validate' && request.method === 'POST') {
-              return handlePromoValidate(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/account/isic/validate' && request.method === 'POST') {
-              return handleIsicValidate(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/account/isic/campaigns' && request.method === 'GET') {
-              return handleIsicCampaignPublic(request, env, corsHeaders);
-            }
             if (url.pathname === '/api/account/rss' && request.method === 'GET') {
               return handleGetAccountRss(request, env, corsHeaders);
             }
@@ -1287,21 +1130,6 @@ const workerHandler = {
               if (sessionId && request.method === 'DELETE') {
                 return handleReleasePlaybackSession(request, env, corsHeaders, sessionId);
               }
-            }
-            if (url.pathname === '/api/account/invoices' && request.method === 'GET') {
-              return handleAccountInvoices(request, env, corsHeaders);
-            }
-            if (
-              url.pathname === '/api/account/transfer-subscription' &&
-              request.method === 'POST'
-            ) {
-              return handleAccountTransferSubscription(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/portal' && request.method === 'POST') {
-              return handlePortal(request, env, corsHeaders);
-            }
-            if (url.pathname === '/api/payments/cancel' && request.method === 'POST') {
-              return handleCancelSubscription(request, env, corsHeaders);
             }
             // ── Push notification routes ──────────────────────────────────────────────
             if (url.pathname === '/api/push/vapid-public-key' && request.method === 'GET') {
@@ -1410,11 +1238,7 @@ const workerHandler = {
         } catch (err) {
           console.error('D1 required schema ensure failed:', err);
         }
-        try {
-          await runComgateRenewalJobs(env);
-        } catch (err) {
-          console.error('Comgate renewal sweep failed:', err);
-        }
+        // Comgate renewals run on @vmp/billing scheduled handler.
         try {
           await runScheduledPublishJobs(env);
           await syncScheduledPublishHint(env);

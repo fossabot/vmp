@@ -36,7 +36,7 @@ Living checklist for humans and coding agents. **Architecture, auth, and runtime
 | `analytics-observability` | Canonical analytics stack (#452, #509, #512, #611) | [#642](https://github.com/tojemoc/vmp/pull/642); plan: [analytics-observability.md](docs/plans/analytics-observability.md). PostHog **application metrics** (alpha): API `posthog-node` metrics + web `posthog.metrics` / network histograms. |
 | `step-08` | Brevo newsletter sync (#645 / TOJ-138) | Opt-out model + sync + admin tab shipped [#665](https://github.com/tojemoc/vmp/pull/665); plan: [step-08-brevo-newsletter.md](docs/plans/step-08-brevo-newsletter.md). Staging smoke with live `BREVO_API_KEY` is maintainer ops. |
 | `step-09` | RSS / podcast feed (#644 / TOJ-137) | Personal + public feeds, revocable token, account UI [#653](https://github.com/tojemoc/vmp/pull/653); plan: [step-09-rss-podcast-feed.md](docs/plans/step-09-rss-podcast-feed.md) |
-| `deployment-feature-modules` | Compile-time `VMP_FEATURES` modules | Phases 1–4 shipped ([#652](https://github.com/tojemoc/vmp/pull/652)+); plan: [deployment-feature-modules.md](docs/plans/deployment-feature-modules.md) |
+| `deployment-feature-modules` | Feature modules (Flagship Tier 1) | Phases 1–4 shipped ([#652](https://github.com/tojemoc/vmp/pull/652)+); Flagship migration: [flagship-and-payment-middleware.md](docs/plans/flagship-and-payment-middleware.md) |
 | `payments-gopay-comgate` | GoPay + Comgate providers (#648 / TOJ-141) | Providers + analytics + production code hardening; live merchant smoke is maintainer ops. Plan: [payments-gopay-comgate.md](docs/plans/payments-gopay-comgate.md) |
 
 ---
@@ -133,6 +133,27 @@ First-party video analytics already in admin (`/api/admin/analytics` + Analytics
 - [x] Pairing-code login on TV + D-pad focus catalog/watch (Sprint 0) — Android TV leanback APK via `EXPO_TV=1` / `react-native-tvos` in `apps/mobile`; CI job `build-android-tv` in `.github/workflows/mobile-artifacts.yml`
 - [ ] Voice control / assistant intents (post–Sprint 0)
 - [ ] Tier 2–4 (tvOS → Tizen/webOS → Titan/VIDAA) + decision gate (Tier 5) — Android TV Sprint 0 shipped; tvOS still open
+
+---
+
+## Planned — infra flags + payment middleware
+
+**Plan:** [docs/plans/flagship-and-payment-middleware.md](docs/plans/flagship-and-payment-middleware.md)
+
+Replace compile-time `VMP_FEATURES` with Cloudflare Flagship (Tier 1), prepare PostHog SSR for future experiment flags (Tier 2), and introduce a product payment middleware above `@vmp/payments` adapters.
+
+### Flagship infrastructure flags (`infra-flagship-flags`)
+
+- [x] Phase 0 — Plan + locked decisions
+- [x] Phase A — Flagship binding + `infraFlags` evaluator; staging flags created
+- [x] Phase B — Remove `VMP_FEATURES` reads; web hydrates from `GET /api/deployment-features`; deploy scripts cleaned ([#725](https://github.com/tojemoc/vmp/pull/725))
+- [x] Phase C — PostHog Nuxt SSR `getFeatureFlag` / `getAllFlags` helpers (no product flags yet) ([#725](https://github.com/tojemoc/vmp/pull/725))
+
+### Payment middleware (`payment-middleware`)
+
+- [x] Phase D — Worker-extractable `PaymentMiddleware` in `@vmp/payments` + Stripe/Qerko; GoPay/Comgate soft-disable; `qerko` public naming; `legacy_migration` gates Qerko create; PostHog + `psp_source` (no MoR stub) ([#725](https://github.com/tojemoc/vmp/pull/725))
+- [x] Phase E — Product checkout/cancel/get/has via middleware; soft-disable + Flagship gates in product layer ([#725](https://github.com/tojemoc/vmp/pull/725))
+- [x] Phase F — Billing Worker owns payment/e-invoice/promo/transfer logic; API proxies via `BILLING` service binding ([#725](https://github.com/tojemoc/vmp/pull/725))
 
 ---
 

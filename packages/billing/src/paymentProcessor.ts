@@ -46,13 +46,14 @@ import {
   isComgateConfigured,
   isGoPayConfigured,
   isGoPayUsingSandbox,
-  isNonLocalFrontendUrl,
   providerIdToDbProvider,
   resolveGoPayApiBase,
   resolvePublicEnabledProviders,
   toApiProviderId,
   toSupportedApiProviderIds,
 } from './paymentProviders.js';
+import { getBillingMiddleware } from './billingFacade.js';
+import { isInfraFeatureEnabled } from './infraFlags.js';
 import {
   captureMappedPostHogEvent,
   capturePostHogException,
@@ -870,7 +871,7 @@ export async function handleGetPricing(request: any, env: any, corsHeaders: any)
         ? gopayPricing
         : enabledProviders.includes('comgate')
           ? comgatePricing
-          : enabledProviders.includes('legacy')
+          : enabledProviders.includes('qerko')
             ? legacyPricing
             : stripePricing;
     const pricingNotConfigured =
@@ -1492,63 +1493,84 @@ export async function handleCheckout(request: any, env: any, corsHeaders: any) {
       );
     }
 
-    if (
-      providerId === 'gopay' &&
-      isGoPayUsingSandbox(env) &&
-      isNonLocalFrontendUrl(env.FRONTEND_URL)
-    ) {
+    // Soft-disable GoPay/Comgate for new subscriptions (A6).
+    if (providerId === 'gopay' || providerId === 'comgate') {
       return jsonResponse(
         {
-          error:
-            'GoPay is still pointed at the sandbox API. Set GOPAY_API_BASE=https://gate.gopay.cz/api before taking live payments.',
-          code: 'gopay_sandbox_in_production',
+          error: `${providerId} is not enabled for new subscriptions`,
+          code: 'provider_soft_disabled',
         },
         503,
         corsHeaders,
       );
     }
 
-    if (!provider.capabilities.newSubscriptions) {
-      const legacyRelink = await db
-        .prepare(`
+    // Relink must come from the authenticated user's needs_relink row — never trust body alone.
+    const bodyPurchaseIdRaw = String(body?.purchaseId ?? '').trim();
+    const legacyRelink = await db
+      .prepare(`
         SELECT purchase_id FROM subscriptions
         WHERE user_id = ? AND provider = 'legacy' AND status = 'needs_relink'
           AND purchase_id IS NOT NULL AND trim(purchase_id) <> ''
         ORDER BY datetime(COALESCE(updated_at, created_at)) DESC
         LIMIT 1
       `)
-        .bind(user.sub)
-        .first();
-      const bodyPurchaseId = String(body?.purchaseId ?? '').trim();
-      if (!legacyRelink && !bodyPurchaseId) {
+      .bind(user.sub)
+      .first();
+    const verifiedRelinkPurchaseId = legacyRelink?.purchase_id
+      ? String(legacyRelink.purchase_id).trim()
+      : '';
+    if (bodyPurchaseIdRaw && verifiedRelinkPurchaseId && bodyPurchaseIdRaw !== verifiedRelinkPurchaseId) {
+      return jsonResponse(
+        {
+          error: 'purchaseId does not match this account pending relink subscription.',
+          code: 'relink_purchase_mismatch',
+        },
+        400,
+        corsHeaders,
+      );
+    }
+    if (bodyPurchaseIdRaw && !verifiedRelinkPurchaseId) {
+      return jsonResponse(
+        {
+          error: 'No pending relink subscription for this account.',
+          code: 'relink_not_pending',
+        },
+        400,
+        corsHeaders,
+      );
+    }
+    // Relink only when the client supplies a purchaseId that matches the DB row.
+    const isVerifiedRelink = Boolean(
+      bodyPurchaseIdRaw && verifiedRelinkPurchaseId && bodyPurchaseIdRaw === verifiedRelinkPurchaseId,
+    );
+    const verifiedPurchaseIdForRelink = isVerifiedRelink ? verifiedRelinkPurchaseId : '';
+
+    // Qerko new checkout requires Flagship legacy_migration (verified relink may still proceed).
+    if (providerId === 'qerko') {
+      const legacyOn = await isInfraFeatureEnabled(env, 'legacy_migration');
+      if (!legacyOn && !isVerifiedRelink) {
         return jsonResponse(
           {
-            error: 'This payment provider is only available for migrated subscriptions.',
-            code: 'provider_migration_only',
+            error: 'Qerko checkout is disabled for this deployment',
+            code: 'feature_disabled',
+            feature: 'legacy_migration',
           },
-          400,
+          404,
           corsHeaders,
         );
       }
     }
 
-    // Guard: don't create a new checkout session if the user already has an
-    // active or trialing subscription. Return a 409 pointing them to the portal.
-    const existingSub = await db
-      .prepare(`
-      SELECT id FROM subscriptions
-      WHERE user_id = ? AND status IN ('active', 'trialing', 'past_due')
-      LIMIT 1
-    `)
-      .bind(user.sub)
-      .first();
-    if (existingSub) {
+    // GoPay/Comgate soft-disabled above — sandbox-in-production guard is moot until re-enabled.
+
+    if (!provider.capabilities.newSubscriptions && !isVerifiedRelink) {
       return jsonResponse(
         {
-          error: 'You already have an active subscription. Use the customer portal to manage it.',
-          code: 'subscription_exists',
+          error: 'This payment provider is only available for migrated subscriptions.',
+          code: 'provider_migration_only',
         },
-        409,
+        400,
         corsHeaders,
       );
     }
@@ -1574,14 +1596,17 @@ export async function handleCheckout(request: any, env: any, corsHeaders: any) {
       .toUpperCase();
     const einvoicingCheckout =
       einvoicingEnabled && (sellerJurisdiction === 'SK' || sellerJurisdiction === 'CZ');
-    const session = await provider.createCheckoutSession({
+    const billing = await getBillingMiddleware(env);
+    const created = await billing.createSubscription({
       userId: user.sub,
       email: user.email,
       planType,
       returnPath,
+      source: apiProvider,
+      isRelink: isVerifiedRelink,
       einvoicingCheckout,
       ...(termsOfServiceUrl ? { termsOfServiceUrl } : {}),
-      ...(typeof body?.purchaseId === 'string' ? { purchaseId: body.purchaseId } : {}),
+      ...(verifiedPurchaseIdForRelink ? { purchaseId: verifiedPurchaseIdForRelink } : {}),
       ...(promoMeta
         ? {
             promo: {
@@ -1595,6 +1620,14 @@ export async function handleCheckout(request: any, env: any, corsHeaders: any) {
           }
         : {}),
     });
+    if (created.type === 'error') {
+      const message =
+        created.code === 'subscription_exists'
+          ? 'You already have an active subscription. Use the customer portal to manage it.'
+          : created.message;
+      return jsonResponse({ error: message, code: created.code }, created.status, corsHeaders);
+    }
+    const session = created.session;
 
     const providerSessionId =
       String(session.orderId ?? session.metadata?.refId ?? '').trim() || null;
@@ -1603,7 +1636,7 @@ export async function handleCheckout(request: any, env: any, corsHeaders: any) {
     ).trim();
     await persistCheckoutConsent(db, {
       userId: user.sub,
-      provider: apiProvider,
+      provider: providerIdToDbProvider(providerId),
       providerSessionId,
       checkoutSessionId: null,
       ...(consentOverride
@@ -2584,6 +2617,7 @@ export async function runComgateRenewalJobs(
 /**
  * GET /api/account/subscription — protected
  * Returns the most recent subscription row for the authenticated user.
+ * Public `provider` uses PspSource naming (`qerko`, not D1 `legacy`).
  */
 export async function handleGetSubscription(request: any, env: any, corsHeaders: any) {
   let user;
@@ -2594,7 +2628,6 @@ export async function handleGetSubscription(request: any, env: any, corsHeaders:
   }
 
   try {
-    const db = getDb(env);
     if (isAdministrativeRole(user.role)) {
       const now = new Date().toISOString();
       return jsonResponse(
@@ -2617,27 +2650,17 @@ export async function handleGetSubscription(request: any, env: any, corsHeaders:
       );
     }
 
-    const sub = await db
-      .prepare(`
-      SELECT id, user_id, plan_type, status, provider, provider_customer_id, stripe_customer_id,
-             current_period_end, cancel_at_period_end, created_at, updated_at
-      FROM subscriptions
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-      LIMIT 1
-    `)
-      .bind(user.sub)
-      .first();
+    const billing = await getBillingMiddleware(env);
+    const sub = await billing.getSubscription(user.sub);
 
     if (!sub) {
       return jsonResponse({ subscription: null }, 200, corsHeaders);
     }
 
-    const provider = sub.provider ?? 'stripe';
     let legacyManageUrl: string | null = null;
     let showLegacyManageButton = false;
     let legacyProviderName: string | null = null;
-    if (provider === 'legacy') {
+    if (sub.source === 'qerko') {
       const [urlRaw, showRaw, nameRaw] = await Promise.all([
         getSetting(env, 'legacy_manage_subscription_url', { ttlSeconds: 300 }),
         getSetting(env, 'legacy_show_manage_button', { ttlSeconds: 300 }),
@@ -2654,18 +2677,15 @@ export async function handleGetSubscription(request: any, env: any, corsHeaders:
       {
         subscription: {
           id: sub.id,
-          planType: sub.plan_type,
+          planType: sub.planType,
           status: sub.status,
-          provider,
-          providerCustomerId: sub.provider_customer_id ?? null,
-          stripeCustomerId: sub.stripe_customer_id,
-          currentPeriodEnd: sub.current_period_end,
-          cancelAtPeriodEnd:
-            sub.cancel_at_period_end === 1 ||
-            sub.cancel_at_period_end === true ||
-            sub.cancel_at_period_end === '1',
-          createdAt: sub.created_at,
-          updatedAt: sub.updated_at,
+          provider: sub.source,
+          providerCustomerId: sub.providerCustomerId,
+          stripeCustomerId: sub.source === 'stripe' ? sub.providerCustomerId : null,
+          currentPeriodEnd: sub.currentPeriodEnd,
+          cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+          createdAt: sub.createdAt,
+          updatedAt: sub.updatedAt,
           legacyManageUrl,
           showLegacyManageButton,
           legacyProviderName,
@@ -2788,94 +2808,24 @@ export async function handleCancelSubscription(request: any, env: any, corsHeade
   }
 
   try {
-    const db = getDb(env);
-    const sub = await db
-      .prepare(`
-      SELECT id, provider, status, provider_subscription_id, cancel_at_period_end
-      FROM subscriptions
-      WHERE user_id = ?
-      ORDER BY
-        CASE
-          WHEN status IN ('active', 'trialing', 'past_due') THEN 0
-          ELSE 1
-        END,
-        created_at DESC
-      LIMIT 1
-    `)
-      .bind(user.sub)
-      .first();
-
-    if (!sub) {
+    const billing = await getBillingMiddleware(env);
+    const current = await billing.getSubscription(user.sub);
+    if (!current || !['active', 'trialing', 'past_due'].includes(current.status)) {
       return jsonResponse({ error: 'No active subscription found' }, 404, corsHeaders);
     }
 
-    const status = String(sub.status ?? '');
-    if (!['active', 'trialing', 'past_due'].includes(status)) {
-      return jsonResponse({ error: 'No active subscription found' }, 404, corsHeaders);
-    }
-
-    const dbProvider = String(sub.provider ?? 'stripe');
-    const registryId = dbProviderToRegistryId(dbProvider);
-    if (registryId !== 'gopay' && registryId !== 'comgate') {
+    const result = await billing.cancelSubscription(user.sub, current.source);
+    if (result.type === 'error') {
       return jsonResponse(
         {
-          error: 'Cancel this subscription from the billing portal.',
-          code: 'cancel_use_portal',
-          provider: registryId,
+          error: result.message,
+          code: result.code,
+          provider: current.source,
         },
-        409,
+        result.status,
         corsHeaders,
       );
     }
-
-    const alreadyCanceling =
-      sub.cancel_at_period_end === 1 ||
-      sub.cancel_at_period_end === true ||
-      sub.cancel_at_period_end === '1';
-    if (alreadyCanceling) {
-      return jsonResponse(
-        { ok: true, cancelAtPeriodEnd: true, idempotent: true },
-        200,
-        corsHeaders,
-      );
-    }
-
-    const subscriptionId = String(sub.provider_subscription_id ?? '').trim();
-    if (!subscriptionId) {
-      return jsonResponse(
-        {
-          error: 'Subscription is missing a provider reference',
-          code: 'missing_provider_subscription',
-        },
-        409,
-        corsHeaders,
-      );
-    }
-
-    const { providers } = await getPaymentProviders(env);
-    let provider = providers.get(registryId);
-    if (!provider) {
-      const config = buildPaymentsConfig(env);
-      const forced = createEnabledProviders([registryId], config);
-      provider = forced.get(registryId);
-    }
-    if (!provider || !provider.isConfigured()) {
-      return jsonResponse(
-        { error: 'Payment provider is not configured', code: 'provider_not_configured' },
-        503,
-        corsHeaders,
-      );
-    }
-
-    await provider.cancelSubscription(subscriptionId);
-    await db
-      .prepare(
-        `UPDATE subscriptions
-         SET cancel_at_period_end = 1, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND user_id = ?`,
-      )
-      .bind(sub.id, user.sub)
-      .run();
 
     return jsonResponse({ ok: true, cancelAtPeriodEnd: true }, 200, corsHeaders);
   } catch (err) {

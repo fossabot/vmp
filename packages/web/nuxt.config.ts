@@ -1,19 +1,13 @@
 import { readBuildInfoDefaults } from './utils/buildInfoSource';
 import { loadMonorepoRootEnv } from './utils/loadMonorepoRootEnv';
 import { posthogBeforeSend } from './utils/posthogBeforeSend';
-import { applyStoredPostHogConsentToClient } from './utils/posthogConsent';
 import { POSTHOG_CAPTURE_PAGELEAVE, POSTHOG_CAPTURE_PAGEVIEW } from './utils/posthogPageview';
 import { resolvePostHogPublicKeyFromEnv } from './utils/posthogPublicKey';
-import {
-  isWebDeploymentFeatureCompiled,
-  resolveWebDeploymentFeatures,
-} from './utils/resolveDeploymentFeatures';
 import { parseEnvBoolean, parseTracesSampleRate } from './utils/sentryOptions';
 
 loadMonorepoRootEnv();
 
 const buildInfo = readBuildInfoDefaults();
-const deploymentFeatures = resolveWebDeploymentFeatures();
 
 const posthogPublicKey = resolvePostHogPublicKeyFromEnv();
 if (posthogPublicKey && !process.env.NUXT_PUBLIC_POSTHOG_PUBLIC_KEY?.trim()) {
@@ -23,10 +17,14 @@ if (posthogPublicKey && !process.env.NUXT_PUBLIC_POSTHOG_PUBLIC_KEY?.trim()) {
 const posthogHost = (process.env.NUXT_PUBLIC_POSTHOG_HOST || 'https://eu.i.posthog.com').trim();
 const posthogProjectId = (process.env.POSTHOG_PROJECT_ID || '').trim();
 const posthogPersonalApiKey = (process.env.POSTHOG_PERSONAL_API_KEY || '').trim();
-const posthogEnabled =
-  isWebDeploymentFeatureCompiled(deploymentFeatures, 'posthog') && Boolean(posthogPublicKey);
-const gtmCompiled = isWebDeploymentFeatureCompiled(deploymentFeatures, 'gtm');
-const pwaCompiled = isWebDeploymentFeatureCompiled(deploymentFeatures, 'pwa');
+/**
+ * A1: register modular plugins when the build has credentials / capability;
+ * Flagship (`isCompiled('posthog'|'gtm')`) gates capture and script load at runtime
+ * after `useDeploymentFeatures` hydration — see `features/posthog/*` and `features/gtm`.
+ */
+const posthogEnabled = Boolean(posthogPublicKey);
+const gtmCompiled = true;
+const pwaCompiled = true;
 const posthogSourcemapsEnabled = Boolean(
   posthogEnabled && posthogProjectId && posthogPersonalApiKey,
 );
@@ -122,10 +120,9 @@ export default defineNuxtConfig({
               config?: { metrics?: Record<string, unknown> };
             }) => {
               posthog.register({ $environment: buildInfo.deployTier || 'development' });
-              // Re-apply after __loaded — composable/plugin sync may have run too early.
-              // opt_in_capturing() / opt_out_capturing() also wire cookieless_mode.
-              // Consent grant/deny also enables/disables metrics.network.
-              applyStoredPostHogConsentToClient(posthog);
+              // Stay opted out until Flagship `posthog` is confirmed compiled and consent
+              // plugins run (features/posthog/*). Avoids capture before hydration.
+              posthog.opt_out_capturing?.();
             },
           },
           serverConfig: {
@@ -229,13 +226,11 @@ export default defineNuxtConfig({
       /** Full git SHA baked in at build time (staging footer shows short form). */
       gitCommit: buildInfo.gitCommit,
       gitRepoUrl: buildInfo.gitRepoUrl,
-      /** Baked PostHog project token — only when `posthog` is in VMP_FEATURES. */
+      /** Baked PostHog project token when configured (Flagship `posthog` gates product use). */
       posthog: {
         publicKey: posthogEnabled ? posthogPublicKey : '',
         host: posthogHost,
       },
-      /** Compile-time feature module allowlist (`VMP_FEATURES`). See docs/plans/deployment-feature-modules.md */
-      deploymentFeatures,
     },
   },
 

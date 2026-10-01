@@ -35,7 +35,15 @@ export {
   deploymentFeatureCatalogEntry,
   isDeploymentFeatureId,
   parseDeploymentFeaturesEnv,
+  parseFeatureAllowlistCsv,
 } from './deploymentFeatures.js';
+export {
+  buildInfraFeatureManifest,
+  createStaticFlagshipBinding,
+  isInfraFeatureEnabled,
+  type FlagshipBinding,
+  type InfraFlagsEnv,
+} from './infraFlags.js';
 export {
   compareVideosNewestFirst,
   placementTimestampMs,
