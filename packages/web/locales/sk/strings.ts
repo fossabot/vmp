@@ -490,6 +490,8 @@ export const strings: StringsDefinition = {
   checkoutPerYear: 'ročne',
   checkoutMostPopular: 'Najobľúbenejšie',
   checkoutPricesLoadFailed: 'Nepodarilo sa načítať ceny. Obnovte prosím stránku.',
+  checkoutPricingNotConfigured:
+    'Platba je dočasne nedostupná. Poskytovatelia platieb nie sú na tomto nasadení nakonfigurovaní.',
   checkoutRedirecting: 'Presmerováva sa na platbu…',
   checkoutPayWithBank: (price: string) => `Bankový prevod · ${price}`,
   checkoutPayWithQerko: 'Zaplatiť cez',

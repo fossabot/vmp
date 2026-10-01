@@ -110,7 +110,11 @@
     </div>
 
     <div v-if="priceError" class="text-red-400 text-sm mb-6">
-      {{ strings.checkoutPricesLoadFailed }}
+      {{
+        priceErrorReason === 'not_configured'
+          ? strings.checkoutPricingNotConfigured
+          : strings.checkoutPricesLoadFailed
+      }}
     </div>
 
     <div v-if="checkoutError" class="text-red-400 text-sm mb-3">
@@ -424,6 +428,8 @@
   const allowedPlans = ref<PlanType[]>(['monthly', 'yearly', 'club']);
   const loadingPrices = ref(false);
   const priceError = ref(false);
+  /** Distinguishes HTTP/network failure from pricing_not_configured / empty providers. */
+  const priceErrorReason = ref<'load' | 'not_configured' | null>(null);
   const selectedPlan = ref<PlanType>('monthly');
   const legacyCheckoutStarting = ref(false);
   const gopayCheckoutStarting = ref(false);
@@ -804,10 +810,12 @@
   async function loadPrices() {
     loadingPrices.value = true;
     priceError.value = false;
+    priceErrorReason.value = null;
     try {
       const res = await fetch(`${apiUrl}/api/account/pricing`);
       if (!res.ok) {
         priceError.value = true;
+        priceErrorReason.value = 'load';
         pendingLegacyCheckoutIntent.value = false;
         pendingGoPayCheckoutIntent.value = false;
         pendingComgateCheckoutIntent.value = false;
@@ -928,6 +936,7 @@
         data.pricing_not_configured === true
       ) {
         priceError.value = true;
+        priceErrorReason.value = 'not_configured';
         pendingLegacyCheckoutIntent.value = false;
         pendingGoPayCheckoutIntent.value = false;
         pendingComgateCheckoutIntent.value = false;
@@ -938,6 +947,7 @@
       }
     } catch {
       priceError.value = true;
+      priceErrorReason.value = 'load';
       pendingLegacyCheckoutIntent.value = false;
       pendingGoPayCheckoutIntent.value = false;
       pendingComgateCheckoutIntent.value = false;
